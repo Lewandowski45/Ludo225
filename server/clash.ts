@@ -125,7 +125,7 @@ function doRoll(s: State, evs: Ev[]) {
   s.movable = mov; s.phase = "move";
 }
 
-// ---------- Bots : Gaou, Yêrê, Danhéré manhisse ----------
+// ---------- Bots : Gaou, Yêrê, Danhéré ----------
 function danger(s: State, t: number, np: number) {
   if (np > 50) return 0;
   const idx = tIdx(t, np);
