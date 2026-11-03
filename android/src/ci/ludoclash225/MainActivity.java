@@ -3,6 +3,7 @@ package ci.ludoclash225;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
+import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -30,6 +31,8 @@ public class MainActivity extends Activity {
         super.onCreate(saved);
         Window w = getWindow();
         w.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        /* Les touches volume règlent le son du jeu (média), pas la sonnerie */
+        setVolumeControlStream(AudioManager.STREAM_MUSIC);
         web = new WebView(this);
         web.setBackgroundColor(Color.parseColor("#04251A"));
         setContentView(web);
