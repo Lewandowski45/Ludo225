@@ -271,8 +271,8 @@ async function handle(body: Record<string, unknown>) {
   if (action === "bot") {
     if (Number(body.seq) !== room.seq) return { ok: true, skipped: true };
     if (room.status !== "playing") return { ok: true, skipped: true };
-    // Joueur absent depuis plus de 40 s : le serveur joue un coup à sa place pour ne pas bloquer le clash
-    const afk = !s.isBot[s.cur] && !!body.afk && Date.now() - Date.parse(room.updated_at) > 40000;
+    // Joueur absent depuis plus de 20 s (chrono du tour) : le serveur joue un coup à sa place pour ne pas bloquer le clash
+    const afk = !s.isBot[s.cur] && !!body.afk && Date.now() - Date.parse(room.updated_at) > 19500;
     if (!s.isBot[s.cur] && !afk) return { ok: true, skipped: true };
     const lvl = s.level;
     if (afk) { s.level = "yere"; s.evs.push({ k: "afk", t: s.cur }); }
