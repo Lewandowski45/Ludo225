@@ -1,4 +1,4 @@
-const C='ludo225-v32';
+const C='ludo225-v33';
 const CORE=['./','index.html','manifest.json','icon-192.png','icon-512.png','img/didib.webp','img/elown.webp','img/himra.webp','img/suspect95.webp','https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js'];
 self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>Promise.all(CORE.map(u=>c.add(new Request(u,{mode:u.startsWith('http')?'no-cors':'same-origin'})).catch(()=>{})))).then(()=>self.skipWaiting()));});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==C).map(x=>caches.delete(x)))).then(()=>self.clients.claim()));});
