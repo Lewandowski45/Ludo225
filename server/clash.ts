@@ -321,7 +321,8 @@ async function handle(body: Record<string, unknown>) {
       s.active = act; s.isBot = s.seats.map((x) => !x.name && x.bot);
       s.pos = [0, 1, 2, 3].map(() => [-1, -1, -1, -1]);
       s.ranks = []; s.sixes = 0; s.firstOut = false; s.dice = 0; s.movable = [];
-      s.cur = act.indexOf(true); s.phase = "roll";
+      /* le clan qui commence est tiré au sort (sinon le rouge aurait toujours l'avantage du 1er lancer) */
+      { const ids = [0, 1, 2, 3].filter((t) => act[t]); s.cur = ids[rndInt(ids.length)]; } s.phase = "roll";
       s.evs.push({ k: "start" }, { k: "turn", t: s.cur });
       await save(room, s, "playing");
       return { ok: true };
