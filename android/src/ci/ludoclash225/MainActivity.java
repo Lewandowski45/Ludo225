@@ -55,7 +55,7 @@ public class MainActivity extends Activity {
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
         s.setAllowFileAccess(false);
         s.setAllowContentAccess(true);
-        s.setUserAgentString(s.getUserAgentString() + " LudoClash225App/1.3");
+        s.setUserAgentString(s.getUserAgentString() + " LudoClash225App/1.4");
         web.addJavascriptInterface(new Bridge(), "LudoApp");
 
         web.setWebViewClient(new WebViewClient() {
@@ -81,7 +81,8 @@ public class MainActivity extends Activity {
                 return true;
             }
         });
-        if (saved != null) web.restoreState(saved); else web.loadUrl(HOME);
+        String start = inviteUrl(getIntent());
+        if (saved != null && start == null) web.restoreState(saved); else web.loadUrl(start != null ? start : HOME);
     }
 
     /* Pont appelé par le jeu : partage l'image du résultat (WhatsApp, statut…) */
@@ -105,6 +106,26 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> { try { startActivity(Intent.createChooser(send, "Partager le clash")); } catch (Exception e) { } });
             } catch (Exception e) { }
         }
+    }
+
+    /* Lien d'invitation reçu (WhatsApp…) : renvoie l'URL du salon ou null */
+    private String inviteUrl(Intent it) {
+        if (it == null || it.getData() == null) return null;
+        Uri u = it.getData();
+        if (!"ludo225.vercel.app".equals(u.getHost())) return null;
+        String c = u.getQueryParameter("salon");
+        if (c == null || !c.matches("[A-Za-z0-9]{5}")) return null;
+        return HOME + "?salon=" + c.toUpperCase();
+    }
+
+    @Override
+    protected void onNewIntent(Intent it) {
+        super.onNewIntent(it);
+        String u = inviteUrl(it);
+        if (u == null || web == null) return;
+        final String code = u.substring(u.length() - 5);
+        /* l'appli est déjà ouverte : on rejoint le salon sans recharger le jeu */
+        web.evaluateJavascript("window.LudoInvite?LudoInvite('" + code + "'):location.href='" + u + "'", null);
     }
 
     private void immersive() {

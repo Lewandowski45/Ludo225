@@ -34,7 +34,7 @@ type Seat = { name: string | null; bot: boolean };
 type State = {
   seats: Seat[]; people: { name: string; team: number | null; host: boolean }[]; level: string;
   active: boolean[]; isBot: boolean[]; pos: number[][]; cur: number; phase: string; dice: number;
-  movable: number[]; ranks: number[]; sixes: number; firstOut: boolean; evs: Ev[];
+  movable: number[]; ranks: number[]; sixes: number; firstOut: boolean; evs: Ev[]; np?: number;
 };
 
 const tIdx = (t: number, p: number) => (START[t] + p) % 52;
@@ -390,6 +390,12 @@ async function handle(body: Record<string, unknown>) {
       s.seats[t].bot = !!body.bot;
       break;
     }
+    case "np": {
+      if (room.status !== "lobby") throw new Oops("Le clash a déjà commencé.");
+      if (!p.is_host) throw new Oops("Seul l'hôte choisit la durée.", 403);
+      s.np = Number(body.np) === 2 ? 2 : 4;
+      break;
+    }
     case "level": {
       if (!p.is_host) throw new Oops("Seul l'hôte choisit le niveau.", 403);
       if (!LEVELS.has(String(body.level))) throw new Oops("Niveau invalide.");
@@ -404,7 +410,9 @@ async function handle(body: Record<string, unknown>) {
       if (act.filter(Boolean).length < 2) throw new Oops("Faut au moins 2 artistes pour faire clash !");
       if (s.people.some((x) => x.team === null)) throw new Oops("Tout le monde doit choisir son artiste avant de lancer.");
       s.active = act; s.isBot = s.seats.map((x) => !x.name && x.bot);
-      s.pos = [0, 1, 2, 3].map(() => [-1, -1, -1, -1]);
+      // clash rapide : les pions en trop sont déjà « rentrés » (56) et ne jouent pas
+      const np = s.np === 2 ? 2 : 4;
+      s.pos = [0, 1, 2, 3].map(() => [0, 1, 2, 3].map((k) => (k < np ? -1 : 56)));
       s.ranks = []; s.sixes = 0; s.firstOut = false; s.dice = 0; s.movable = [];
       /* le clan qui commence est tiré au sort (sinon le rouge aurait toujours l'avantage du 1er lancer) */
       { const ids = [0, 1, 2, 3].filter((t) => act[t]); s.cur = ids[rndInt(ids.length)]; } s.phase = "roll";
