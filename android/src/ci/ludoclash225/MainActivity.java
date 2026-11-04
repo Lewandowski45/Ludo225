@@ -12,7 +12,12 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.content.ClipData;
+import android.util.Base64;
+import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
+import java.io.File;
+import java.io.FileOutputStream;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -50,7 +55,8 @@ public class MainActivity extends Activity {
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
         s.setAllowFileAccess(false);
         s.setAllowContentAccess(true);
-        s.setUserAgentString(s.getUserAgentString() + " LudoClash225App/1.0");
+        s.setUserAgentString(s.getUserAgentString() + " LudoClash225App/1.3");
+        web.addJavascriptInterface(new Bridge(), "LudoApp");
 
         web.setWebViewClient(new WebViewClient() {
             @Override
@@ -76,6 +82,29 @@ public class MainActivity extends Activity {
             }
         });
         if (saved != null) web.restoreState(saved); else web.loadUrl(HOME);
+    }
+
+    /* Pont appelé par le jeu : partage l'image du résultat (WhatsApp, statut…) */
+    class Bridge {
+        @JavascriptInterface public boolean canShare() { return true; }
+        @JavascriptInterface public void shareImage(String dataUrl, String text) {
+            try {
+                String b64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
+                byte[] png = Base64.decode(b64, Base64.DEFAULT);
+                if (png.length > 8 * 1024 * 1024) return;
+                File f = ShareProvider.fileFor(MainActivity.this);
+                f.getParentFile().mkdirs();
+                try (FileOutputStream o = new FileOutputStream(f)) { o.write(png); }
+                final Uri uri = Uri.parse("content://" + ShareProvider.AUTH + "/ludo-clash-225.png");
+                final Intent send = new Intent(Intent.ACTION_SEND);
+                send.setType("image/png");
+                send.putExtra(Intent.EXTRA_STREAM, uri);
+                if (text != null) send.putExtra(Intent.EXTRA_TEXT, text);
+                send.setClipData(ClipData.newRawUri("", uri));
+                send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                runOnUiThread(() -> { try { startActivity(Intent.createChooser(send, "Partager le clash")); } catch (Exception e) { } });
+            } catch (Exception e) { }
+        }
     }
 
     private void immersive() {
