@@ -55,7 +55,7 @@ public class MainActivity extends Activity {
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
         s.setAllowFileAccess(false);
         s.setAllowContentAccess(true);
-        s.setUserAgentString(s.getUserAgentString() + " LudoClash225App/1.4");
+        s.setUserAgentString(s.getUserAgentString() + " LudoClash225App/1.5");
         web.addJavascriptInterface(new Bridge(), "LudoApp");
 
         web.setWebViewClient(new WebViewClient() {
@@ -82,12 +82,25 @@ public class MainActivity extends Activity {
             }
         });
         String start = inviteUrl(getIntent());
+        Rappels.schedule(this);
         if (saved != null && start == null) web.restoreState(saved); else web.loadUrl(start != null ? start : HOME);
     }
 
     /* Pont appelé par le jeu : partage l'image du résultat (WhatsApp, statut…) */
     class Bridge {
         @JavascriptInterface public boolean canShare() { return true; }
+        /* état du défi du jour envoyé par le jeu (pour savoir s'il faut rappeler) */
+        @JavascriptInterface public void setDefi(String day, boolean done, int streak, String last) {
+            Rappels.prefs(MainActivity.this).edit().putString("day", day).putBoolean("done", done).putInt("streak", streak).putString("last", last).apply();
+        }
+        @JavascriptInterface public boolean notifOn() { return Rappels.prefs(MainActivity.this).getBoolean("on", false); }
+        @JavascriptInterface public boolean notifAsked() { return Rappels.prefs(MainActivity.this).getBoolean("asked", false); }
+        @JavascriptInterface public void setNotif(boolean on) {
+            Rappels.prefs(MainActivity.this).edit().putBoolean("on", on).putBoolean("asked", true).apply();
+            if (on && Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                runOnUiThread(() -> requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 77));
+            Rappels.schedule(MainActivity.this);
+        }
         @JavascriptInterface public void shareImage(String dataUrl, String text) {
             try {
                 String b64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
@@ -113,9 +126,9 @@ public class MainActivity extends Activity {
         if (it == null || it.getData() == null) return null;
         Uri u = it.getData();
         if (!"ludo225.vercel.app".equals(u.getHost())) return null;
-        String c = u.getQueryParameter("salon");
-        if (c == null || !c.matches("[A-Za-z0-9]{5}")) return null;
-        return HOME + "?salon=" + c.toUpperCase();
+        String q = u.getEncodedQuery();
+        if (q == null || !(q.contains("salon=") || q.contains("defi=") || q.contains("ref="))) return null;
+        return HOME + "?" + q;
     }
 
     @Override
@@ -123,9 +136,9 @@ public class MainActivity extends Activity {
         super.onNewIntent(it);
         String u = inviteUrl(it);
         if (u == null || web == null) return;
-        final String code = u.substring(u.length() - 5);
-        /* l'appli est déjà ouverte : on rejoint le salon sans recharger le jeu */
-        web.evaluateJavascript("window.LudoInvite?LudoInvite('" + code + "'):location.href='" + u + "'", null);
+        final String q = u.substring(u.indexOf('?')).replaceAll("[^A-Za-z0-9?=&_%.-]", "");
+        /* l'appli est déjà ouverte : on traite le lien (salon, défi, parrain) sans recharger le jeu */
+        web.evaluateJavascript("window.LudoOpen?LudoOpen('" + q + "'):location.href='" + HOME + q + "'", null);
     }
 
     private void immersive() {
