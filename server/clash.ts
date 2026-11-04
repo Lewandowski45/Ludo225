@@ -195,6 +195,87 @@ async function sha256(t: string) {
 const cleanName = (n: unknown) => String(n ?? "").replace(/[<>&"']/g, "").trim().slice(0, 16) || "Joueur";
 const LEVELS = new Set(["gaou", "yere", "danhere"]);
 
+// ---------- Classement ----------
+const FAVS = new Set(["didib", "elown", "himra", "suspect95"]);
+const nat = (v: unknown, max = 10_000_000) => { const n = Math.floor(Number(v)); return Number.isFinite(n) && n > 0 ? Math.min(n, max) : 0; };
+const keyHash = async (k: unknown) => {
+  if (typeof k !== "string" || k.length < 20 || k.length > 100) throw new Oops("Clé invalide.", 403);
+  return await sha256("lb:" + k);
+};
+type Lb = { key_hash: string; pseudo: string; fav: string; xp: number; games: number; wins: number; caps: number; tours: number; online_games: number; online_wins: number; updated_at: string };
+const XP_MAX_PER_GAME = 150, XP_PER_TOUR = 100, FIRST_GAMES_MAX = 10, MIN_PER_GAME = 2;
+async function lbSync(body: Record<string, unknown>) {
+  const h = await keyHash(body.key);
+  const pseudo = cleanName(body.pseudo);
+  if (!String(body.pseudo ?? "").trim()) throw new Oops("Choisis d'abord ton pseudo.");
+  const fav = FAVS.has(String(body.fav)) ? String(body.fav) : "didib";
+  const inc = { xp: nat(body.xp), games: nat(body.games, 100000), wins: nat(body.wins, 100000), caps: nat(body.caps, 10_000_000), tours: nat(body.tours, 100000) };
+  const { data: old } = await db.from("leaderboard").select("*").eq("key_hash", h).maybeSingle() as { data: Lb | null };
+  const row: Record<string, unknown> = { key_hash: h, pseudo, fav, updated_at: new Date().toISOString() };
+  if (old) {
+    // anti-triche : les compteurs ne baissent jamais et l'XP ne peut pas monter plus vite que les parties jouées
+    // au plus 1 clash toutes les 2 minutes depuis la dernière mise à jour (un clash dure plus que ça)
+    const room = 1 + Math.floor((Date.now() - Date.parse(old.updated_at)) / 60000 / MIN_PER_GAME);
+    const games = Math.min(Math.max(old.games, inc.games), old.games + room);
+    const dg = games - old.games;
+    const tours = Math.min(Math.max(old.tours, inc.tours), Math.max(old.tours, Math.floor(games / 2)));
+    row.games = games; row.tours = tours;
+    row.wins = Math.min(Math.max(old.wins, inc.wins), old.wins + dg, games);
+    row.caps = Math.min(Math.max(old.caps, inc.caps), old.caps + dg * 60);
+    row.xp = Math.min(Math.max(old.xp, inc.xp), old.xp + dg * XP_MAX_PER_GAME + (tours - old.tours) * XP_PER_TOUR);
+  } else {
+    row.games = Math.min(inc.games, FIRST_GAMES_MAX); row.tours = Math.min(inc.tours, Math.floor((row.games as number) / 2));
+    row.wins = Math.min(inc.wins, row.games as number); row.caps = Math.min(inc.caps, (row.games as number) * 60);
+    row.xp = Math.min(inc.xp, (row.games as number) * XP_MAX_PER_GAME + (row.tours as number) * XP_PER_TOUR);
+  }
+  const { error } = await db.from("leaderboard").upsert(row);
+  if (error) throw new Oops("Erreur serveur, réessaie.", 500);
+  return { ok: true, xp: row.xp };
+}
+async function lbTop(body: Record<string, unknown>) {
+  const board = String(body.board ?? "xp");
+  let me: Lb | null = null;
+  if (typeof body.key === "string" && body.key.length >= 20) {
+    const { data } = await db.from("leaderboard").select("*").eq("key_hash", await keyHash(body.key)).maybeSingle();
+    me = data as Lb | null;
+  }
+  const pub = (r: Lb, i: number) => ({ r: i + 1, p: r.pseudo, f: r.fav, xp: r.xp, w: r.wins, g: r.games, ow: r.online_wins, og: r.online_games, t: r.tours, me: !!me && r.key_hash === me.key_hash });
+  if (board === "clans") {
+    const { data } = await db.from("leaderboard").select("fav,xp,wins,online_wins").eq("hidden", false).limit(10000);
+    const agg: Record<string, { xp: number; fans: number; wins: number }> = {};
+    for (const f of FAVS) agg[f] = { xp: 0, fans: 0, wins: 0 };
+    for (const r of (data ?? []) as { fav: string; xp: number; wins: number }[]) { const a = agg[r.fav]; if (!a) continue; a.xp += r.xp; a.fans++; a.wins += r.wins; }
+    return { board, clans: Object.entries(agg).map(([f, a]) => ({ f, ...a })).sort((a, b) => b.xp - a.xp), myFav: me ? me.fav : null };
+  }
+  const col = board === "online" ? "online_wins" : "xp";
+  let q = db.from("leaderboard").select("*").eq("hidden", false).order(col, { ascending: false }).order("updated_at", { ascending: true }).limit(50);
+  q = board === "online" ? q.gt("online_games", 0) : q.gt("xp", 0);
+  const { data } = await q;
+  const list = ((data ?? []) as Lb[]).map(pub);
+  let mine = null;
+  if (me) {
+    const v = board === "online" ? me.online_wins : me.xp;
+    const { count } = await db.from("leaderboard").select("key_hash", { count: "exact", head: true }).eq("hidden", false).gt(col, v);
+    mine = { ...pub(me, (count ?? 0)), r: (count ?? 0) + 1 };
+  }
+  return { board, list, mine };
+}
+// victoires en ligne vérifiées : comptées par le serveur à la fin d'un clash avec au moins 2 vrais joueurs
+async function onlineOver(code: string, s: State) {
+  try {
+    const { data } = await db.from("players").select("name,team,dkey_hash").eq("room", code);
+    const hum = ((data ?? []) as { name: string; team: number | null; dkey_hash: string | null }[]).filter((p) => p.team !== null);
+    if (hum.length < 2) return;
+    for (const p of hum) {
+      if (!p.dkey_hash) continue;
+      const { data: old } = await db.from("leaderboard").select("online_games,online_wins").eq("key_hash", p.dkey_hash).maybeSingle();
+      const win = s.ranks[0] === p.team ? 1 : 0;
+      if (old) await db.from("leaderboard").update({ online_games: (old as Lb).online_games + 1, online_wins: (old as Lb).online_wins + win }).eq("key_hash", p.dkey_hash);
+      else await db.from("leaderboard").insert({ key_hash: p.dkey_hash, pseudo: cleanName(p.name), online_games: 1, online_wins: win });
+    }
+  } catch (e) { console.error(e); }
+}
+
 function emptyState(): State {
   return {
     seats: [0, 1, 2, 3].map(() => ({ name: null, bot: false })), people: [], level: "yere",
@@ -243,7 +324,7 @@ async function handle(body: Record<string, unknown>) {
       const { error } = await db.from("rooms").insert({ code: c, state: s });
       if (error) continue;
       const token = newToken();
-      await db.from("players").insert({ room: c, token_hash: await sha256(token), name: cleanName(body.name), is_host: true });
+      await db.from("players").insert({ room: c, token_hash: await sha256(token), name: cleanName(body.name), is_host: true, dkey_hash: typeof body.dkey === "string" && body.dkey.length >= 20 ? await keyHash(body.dkey) : null });
       const room = await loadRoom(c);
       await refreshPeople(c, room.state);
       await save(room, room.state);
@@ -258,11 +339,14 @@ async function handle(body: Record<string, unknown>) {
     const { count } = await db.from("players").select("id", { count: "exact", head: true }).eq("room", code);
     if ((count ?? 0) >= 4) throw new Oops("Le salon est plein (4 joueurs).");
     const token = newToken();
-    await db.from("players").insert({ room: code, token_hash: await sha256(token), name: cleanName(body.name), is_host: false });
+    await db.from("players").insert({ room: code, token_hash: await sha256(token), name: cleanName(body.name), is_host: false, dkey_hash: typeof body.dkey === "string" && body.dkey.length >= 20 ? await keyHash(body.dkey) : null });
     await refreshPeople(code, room.state);
     await save(room, room.state);
     return { code, token };
   }
+
+  if (action === "lb_sync") return await lbSync(body);
+  if (action === "lb_top") return await lbTop(body);
 
   const room = await loadRoom(code);
   const s = room.state;
@@ -281,6 +365,7 @@ async function handle(body: Record<string, unknown>) {
     else return { ok: true, skipped: true };
     s.level = lvl;
     await save(room, s, s.phase === "over" ? "over" : undefined);
+    if (s.phase === "over") await onlineOver(code, s);
     return { ok: true };
   }
 
@@ -364,6 +449,7 @@ async function handle(body: Record<string, unknown>) {
     default: throw new Oops("Action inconnue.");
   }
   await save(room, s, s.phase === "over" ? "over" : undefined);
+  if (s.phase === "over" && (action === "move" || action === "roll")) await onlineOver(code, s);
   return { ok: true };
 }
 
