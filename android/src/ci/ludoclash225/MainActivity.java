@@ -55,7 +55,7 @@ public class MainActivity extends Activity {
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
         s.setAllowFileAccess(false);
         s.setAllowContentAccess(true);
-        s.setUserAgentString(s.getUserAgentString() + " LudoClash225App/1.5");
+        s.setUserAgentString(s.getUserAgentString() + " LudoClash225App/1.7");
         web.addJavascriptInterface(new Bridge(), "LudoApp");
 
         web.setWebViewClient(new WebViewClient() {
@@ -63,7 +63,9 @@ public class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
                 Uri u = req.getUrl();
                 String host = u.getHost() == null ? "" : u.getHost();
-                if (host.equals("ludo225.vercel.app")) return false;
+                String path = u.getPath() == null ? "" : u.getPath();
+                /* les fichiers à télécharger (mise à jour de l'appli) s'ouvrent dans le navigateur */
+                if (host.equals("ludo225.vercel.app") && !path.startsWith("/dl/")) return false;
                 try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception e) { }
                 return true;
             }
