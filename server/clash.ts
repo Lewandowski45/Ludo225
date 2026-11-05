@@ -442,7 +442,7 @@ async function accCreate(body: Record<string, unknown>) {
   const { data: taken } = await db.from("accounts").select("pseudo_norm").eq("pseudo_norm", n).maybeSingle();
   if (taken) throw new Oops("Ce pseudo est déjà pris.");
   const salt = b64(crypto.getRandomValues(new Uint8Array(16)));
-  const { error } = await db.from("accounts").insert({ pseudo_norm: n, pseudo, key_hash: h, pkey_enc: await enc(String(body.key)), pin_hash: await pinHash(pin, salt), salt, save: cleanSave(body.save), save_at: body.save ? new Date().toISOString() : null });
+  const { error } = await db.from("accounts").insert({ pseudo_norm: n, pseudo, key_hash: h, pkey_enc: await enc(String(body.key)), pin_hash: await pinHash(pin, salt), salt, save: cleanSave(body.save), save_at: body.save ? new Date().toISOString() : null, cgu: typeof body.cgu === "string" ? body.cgu.slice(0, 20) : null });
   if (error) throw new Oops(error.code === "23505" ? "Ce pseudo est déjà pris." : "Erreur serveur, réessaie.", error.code === "23505" ? 400 : 500);
   await db.from("leaderboard").update({ pseudo }).eq("key_hash", h);
   await bump("accounts");
@@ -518,6 +518,29 @@ async function aidRestore(body: Record<string, unknown>) {
   if (!a || !a.save) return { found: false };
   await bump("restores_auto");
   return { found: true, pseudo: a.pseudo, key: await dec(l.pkey_enc), save: await clampSave(l.key_hash, a.save) };
+}
+// suppression du compte et des données du joueur (droit à l'effacement)
+async function accDelete(body: Record<string, unknown>) {
+  const h = await keyHash(body.key);
+  const { data } = await db.from("accounts").select("*").eq("key_hash", h).maybeSingle();
+  if (data) {
+    const a = data as Acc;
+    if (a.locked_until && Date.parse(a.locked_until) > Date.now()) throw new Oops("Trop d'essais. Réessaie plus tard.", 429);
+    const pin = String(body.pin ?? "");
+    if (!/^\d{4}$/.test(pin) || (await pinHash(pin, a.salt)) !== a.pin_hash) {
+      const f = a.fails + 1;
+      await db.from("accounts").update(f >= LOCK_FAILS ? { fails: 0, locked_until: new Date(Date.now() + LOCK_MIN * 60000).toISOString() } : { fails: f }).eq("key_hash", h);
+      throw new Oops("Code secret faux.", 403);
+    }
+    await db.from("accounts").delete().eq("key_hash", h);
+  }
+  await db.from("device_links").delete().eq("key_hash", h);
+  await db.from("leaderboard").delete().eq("key_hash", h);
+  await db.from("weekly_champions").update({ pseudo: "Ancien joueur" }).eq("key_hash", h);
+  await db.from("device_days").delete().eq("key_hash", h);
+  await db.from("devices").delete().eq("key_hash", h);
+  await bump("deletions");
+  return { ok: true };
 }
 async function adminExclude(body: Record<string, unknown>) {
   await adminCheck(body);
@@ -630,6 +653,7 @@ async function handle(body: Record<string, unknown>) {
   if (action === "acc_save") return await accSave(body);
   if (action === "acc_restore") return await accRestore(body);
   if (action === "aid_restore") return await aidRestore(body);
+  if (action === "acc_delete") return await accDelete(body);
 
   const room = await loadRoom(code);
   const s = room.state;
