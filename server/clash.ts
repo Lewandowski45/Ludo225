@@ -32,7 +32,7 @@ const P_SIX = 0.23, P_ANTISTACK = 0.85;
 type Ev = Record<string, unknown>;
 type Seat = { name: string | null; bot: boolean };
 type State = {
-  seats: Seat[]; people: { name: string; team: number | null; host: boolean }[]; level: string;
+  seats: Seat[]; people: { name: string; team: number | null; host: boolean; cos?: Record<string, string> | null }[]; level: string;
   active: boolean[]; isBot: boolean[]; pos: number[][]; cur: number; phase: string; dice: number;
   movable: number[]; ranks: number[]; sixes: number; firstOut: boolean; evs: Ev[]; np?: number;
 };
@@ -194,6 +194,14 @@ async function sha256(t: string) {
 }
 const cleanName = (n: unknown) => String(n ?? "").replace(/[<>&"']/g, "").trim().slice(0, 16) || "Joueur";
 const LEVELS = new Set(["gaou", "yere", "danhere"]);
+// style choisi par le joueur (dé, pion, forme, effets, thème) : visible par les autres en ligne
+const COS_KEYS = ["dice", "pawn", "shape", "cfx", "hfx", "skin"];
+function cleanCos(v: unknown) {
+  if (!v || typeof v !== "object") return null;
+  const o: Record<string, string> = {};
+  for (const k of COS_KEYS) { const x = (v as Record<string, unknown>)[k]; if (typeof x === "string" && /^[a-z0-9]{1,20}$/.test(x)) o[k] = x; }
+  return Object.keys(o).length ? o : null;
+}
 
 // ---------- Classement ----------
 const FAVS = new Set(["didib", "elown", "himra", "suspect95"]);
@@ -600,8 +608,8 @@ async function save(room: { code: string; seq: number }, s: State, status?: stri
   if (!data || !data.length) throw new Oops("conflict", 409);
 }
 async function refreshPeople(code: string, s: State) {
-  const { data } = await db.from("players").select("name,team,is_host").eq("room", code).order("created_at");
-  s.people = (data ?? []).map((p: { name: string; team: number | null; is_host: boolean }) => ({ name: p.name, team: p.team, host: p.is_host }));
+  const { data } = await db.from("players").select("name,team,is_host,cos").eq("room", code).order("created_at");
+  s.people = (data ?? []).map((p: { name: string; team: number | null; is_host: boolean; cos: Record<string, string> | null }) => ({ name: p.name, team: p.team, host: p.is_host, cos: p.cos ?? null }));
   for (let t = 0; t < 4; t++) {
     const h = s.people.find((p) => p.team === t);
     s.seats[t] = { name: h ? h.name : null, bot: h ? false : s.seats[t].bot };
@@ -619,7 +627,7 @@ async function handle(body: Record<string, unknown>) {
       const { error } = await db.from("rooms").insert({ code: c, state: s });
       if (error) continue;
       const token = newToken();
-      await db.from("players").insert({ room: c, token_hash: await sha256(token), name: cleanName(body.name), is_host: true, dkey_hash: typeof body.dkey === "string" && body.dkey.length >= 20 ? await keyHash(body.dkey) : null });
+      await db.from("players").insert({ room: c, token_hash: await sha256(token), name: cleanName(body.name), cos: cleanCos(body.cos), is_host: true, dkey_hash: typeof body.dkey === "string" && body.dkey.length >= 20 ? await keyHash(body.dkey) : null });
       const room = await loadRoom(c);
       await refreshPeople(c, room.state);
       await save(room, room.state);
@@ -634,7 +642,7 @@ async function handle(body: Record<string, unknown>) {
     const { count } = await db.from("players").select("id", { count: "exact", head: true }).eq("room", code);
     if ((count ?? 0) >= 4) throw new Oops("Le salon est plein (4 joueurs).");
     const token = newToken();
-    await db.from("players").insert({ room: code, token_hash: await sha256(token), name: cleanName(body.name), is_host: false, dkey_hash: typeof body.dkey === "string" && body.dkey.length >= 20 ? await keyHash(body.dkey) : null });
+    await db.from("players").insert({ room: code, token_hash: await sha256(token), name: cleanName(body.name), cos: cleanCos(body.cos), is_host: false, dkey_hash: typeof body.dkey === "string" && body.dkey.length >= 20 ? await keyHash(body.dkey) : null });
     await refreshPeople(code, room.state);
     await save(room, room.state);
     return { code, token };
@@ -761,6 +769,11 @@ async function handle(body: Record<string, unknown>) {
       break;
     }
     case "me": return { team: p.team, host: p.is_host, name: p.name };
+    case "cos": {
+      await db.from("players").update({ cos: cleanCos(body.cos) }).eq("id", p.id);
+      await refreshPeople(code, s);
+      break;
+    }
     default: throw new Oops("Action inconnue.");
   }
   await save(room, s, s.phase === "over" ? "over" : undefined);
