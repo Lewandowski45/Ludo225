@@ -89,6 +89,18 @@ public class MainActivity extends Activity {
     /* Pont appelé par le jeu : partage l'image du résultat (WhatsApp, statut…) */
     class Bridge {
         @JavascriptInterface public boolean canShare() { return true; }
+        /* identifiant fixe du téléphone (ne change pas si on vide les données ou réinstalle l'appli) : sert à retrouver la progression */
+        @JavascriptInterface public String aid() {
+            try {
+                String id = android.provider.Settings.Secure.getString(getContentResolver(), android.provider.Settings.Secure.ANDROID_ID);
+                if (id == null || id.length() < 4) return "";
+                java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+                byte[] h = md.digest(("ludo225:" + id).getBytes("UTF-8"));
+                StringBuilder sb = new StringBuilder();
+                for (byte b : h) sb.append(String.format("%02x", b));
+                return sb.toString();
+            } catch (Exception e) { return ""; }
+        }
         /* état du défi du jour envoyé par le jeu (pour savoir s'il faut rappeler) */
         @JavascriptInterface public void setDefi(String day, boolean done, int streak, String last) {
             Rappels.prefs(MainActivity.this).edit().putString("day", day).putBoolean("done", done).putInt("streak", streak).putString("last", last).apply();

@@ -228,9 +228,15 @@ async function lbSync(body: Record<string, unknown>) {
     row.wins = Math.min(inc.wins, row.games as number); row.caps = Math.min(inc.caps, (row.games as number) * 60);
     row.xp = Math.min(inc.xp, (row.games as number) * XP_MAX_PER_GAME + (row.tours as number) * XP_PER_TOUR);
   }
-  const { error } = await db.from("leaderboard").upsert(row);
+  await ensureChampion();
+  const o2 = old as (Lb & { week_key: string | null; week_xp: number; ref_code: string | null; referred_by: string | null; refs: number }) | null;
+  const dxp = Math.max(0, (row.xp as number) - (o2 ? o2.xp : 0));
+  Object.assign(row, weekPatch(o2, o2 ? dxp : Math.min(dxp, 300)));
+  if (!o2 || !o2.ref_code) row.ref_code = newRef();
+  let { error } = await db.from("leaderboard").upsert(row);
+  if (error && !o2) { row.ref_code = newRef(); ({ error } = await db.from("leaderboard").upsert(row)); }
   if (error) throw new Oops("Erreur serveur, réessaie.", 500);
-  return { ok: true, xp: row.xp };
+  return { ok: true, xp: row.xp, ref: (row.ref_code as string) ?? o2?.ref_code, refs: o2?.refs ?? 0, referred: !!o2?.referred_by, crowns: await perks(h) };
 }
 async function lbTop(body: Record<string, unknown>) {
   const board = String(body.board ?? "xp");
@@ -247,6 +253,21 @@ async function lbTop(body: Record<string, unknown>) {
     for (const r of (data ?? []) as { fav: string; xp: number; wins: number }[]) { const a = agg[r.fav]; if (!a) continue; a.xp += r.xp; a.fans++; a.wins += r.wins; }
     return { board, clans: Object.entries(agg).map(([f, a]) => ({ f, ...a })).sort((a, b) => b.xp - a.xp), myFav: me ? me.fav : null };
   }
+  if (board === "week") {
+    await ensureChampion();
+    const wk = weekKey();
+    const { data } = await db.from("leaderboard").select("*").eq("hidden", false).eq("week_key", wk).gt("week_xp", 0).order("week_xp", { ascending: false }).order("updated_at", { ascending: true }).limit(50);
+    const pw = (r: Lb & { week_xp: number }, i: number) => ({ ...pub(r, i), wx: r.week_xp });
+    const list = ((data ?? []) as (Lb & { week_xp: number })[]).map(pw);
+    let mine = null;
+    const m = me as (Lb & { week_key: string | null; week_xp: number }) | null;
+    if (m && m.week_key === wk && m.week_xp > 0) {
+      const { count } = await db.from("leaderboard").select("key_hash", { count: "exact", head: true }).eq("hidden", false).eq("week_key", wk).gt("week_xp", m.week_xp);
+      mine = { ...pw(m, count ?? 0), r: (count ?? 0) + 1 };
+    }
+    const { data: ch } = await db.from("weekly_champions").select("pseudo,fav,xp,week_key").order("week_key", { ascending: false }).limit(1);
+    return { board, list, mine, champ: ch?.[0] ?? null, resetIn: msToReset() };
+  }
   const col = board === "online" ? "online_wins" : "xp";
   let q = db.from("leaderboard").select("*").eq("hidden", false).order(col, { ascending: false }).order("updated_at", { ascending: true }).limit(50);
   q = board === "online" ? q.gt("online_games", 0) : q.gt("xp", 0);
@@ -259,6 +280,257 @@ async function lbTop(body: Record<string, unknown>) {
     mine = { ...pub(me, (count ?? 0)), r: (count ?? 0) + 1 };
   }
   return { board, list, mine };
+}
+// ---------- Saison de la semaine (remise à zéro le lundi 00:00 UTC = heure d'Abidjan) ----------
+function weekKey(d = new Date()) {
+  const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const day = t.getUTCDay() || 7; t.setUTCDate(t.getUTCDate() + 4 - day);
+  const y0 = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+  return `${t.getUTCFullYear()}-W${String(Math.ceil(((t.getTime() - y0.getTime()) / 86400000 + 1) / 7)).padStart(2, "0")}`;
+}
+const prevWeekKey = () => weekKey(new Date(Date.now() - 7 * 86400000));
+function msToReset() { const d = new Date(); const day = d.getUTCDay() || 7; const n = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + (8 - day))); return n.getTime() - d.getTime(); }
+let champChecked = "";
+async function ensureChampion() {
+  const pw = prevWeekKey();
+  if (champChecked === pw) return;
+  const { data: ex } = await db.from("weekly_champions").select("week_key").eq("week_key", pw).maybeSingle();
+  if (!ex) {
+    const a = await db.from("leaderboard").select("key_hash,pseudo,fav,week_xp").eq("hidden", false).eq("week_key", pw).gt("week_xp", 0).order("week_xp", { ascending: false }).limit(1);
+    const b = await db.from("leaderboard").select("key_hash,pseudo,fav,prev_week_xp").eq("hidden", false).eq("prev_week_key", pw).gt("prev_week_xp", 0).order("prev_week_xp", { ascending: false }).limit(1);
+    const ca = a.data?.[0] as { key_hash: string; pseudo: string; fav: string; week_xp: number } | undefined;
+    const cb = b.data?.[0] as { key_hash: string; pseudo: string; fav: string; prev_week_xp: number } | undefined;
+    const best = ca && (!cb || ca.week_xp >= cb.prev_week_xp) ? { k: ca.key_hash, p: ca.pseudo, f: ca.fav, x: ca.week_xp } : cb ? { k: cb.key_hash, p: cb.pseudo, f: cb.fav, x: cb.prev_week_xp } : null;
+    if (best) await db.from("weekly_champions").upsert({ week_key: pw, key_hash: best.k, pseudo: best.p, fav: best.f, xp: best.x }, { onConflict: "week_key", ignoreDuplicates: true });
+  }
+  champChecked = pw;
+}
+// ajoute de l'XP de saison en gérant le passage à une nouvelle semaine
+function weekPatch(old: { week_key?: string | null; week_xp?: number } | null, add: number) {
+  const wk = weekKey();
+  if (old && old.week_key === wk) return { week_key: wk, week_xp: (old.week_xp ?? 0) + add };
+  const p: Record<string, unknown> = { week_key: wk, week_xp: add };
+  if (old && old.week_key) { p.prev_week_key = old.week_key; p.prev_week_xp = old.week_xp ?? 0; }
+  return p;
+}
+const newRef = () => Array.from({ length: 6 }, () => ALPHA[rndInt(ALPHA.length)]).join("");
+const REF_BONUS = 200, REF_MAX = 20;
+async function perks(h: string) {
+  const { count } = await db.from("weekly_champions").select("week_key", { count: "exact", head: true }).eq("key_hash", h);
+  return count ?? 0;
+}
+async function lbRef(body: Record<string, unknown>) {
+  const h = await keyHash(body.key);
+  const ref = String(body.ref ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (ref.length !== 6) throw new Oops("Code de parrain invalide.");
+  const { data: me } = await db.from("leaderboard").select("*").eq("key_hash", h).maybeSingle();
+  if (!me) throw new Oops("Joue d'abord un clash avec ton pseudo.");
+  const m = me as Lb & { referred_by: string | null; ref_code: string | null; week_key: string | null; week_xp: number };
+  if (m.referred_by) return { ok: true, already: true };
+  if (m.games < 1) throw new Oops("Joue d'abord un clash.");
+  if (m.ref_code === ref) throw new Oops("Tu ne peux pas être ton propre parrain.");
+  if (Date.now() - Date.parse((me as { created_at: string }).created_at) > 14 * 86400000) throw new Oops("Le parrainage marche seulement pour les nouveaux joueurs.");
+  const { data: par } = await db.from("leaderboard").select("*").eq("ref_code", ref).maybeSingle();
+  if (!par) throw new Oops("Ce code de parrain n'existe pas.");
+  const pa = par as Lb & { refs: number; week_key: string | null; week_xp: number };
+  await db.from("leaderboard").update({ referred_by: pa.key_hash, xp: m.xp + REF_BONUS, ...weekPatch(m, REF_BONUS) }).eq("key_hash", h).is("referred_by", null);
+  if (pa.refs < REF_MAX) await db.from("leaderboard").update({ refs: pa.refs + 1, xp: pa.xp + REF_BONUS, ...weekPatch(pa, REF_BONUS) }).eq("key_hash", pa.key_hash);
+  await bump("referrals");
+  return { ok: true, bonus: REF_BONUS, parrain: pa.pseudo };
+}
+// ---------- Compteur anonyme (aucune donnée personnelle) ----------
+const today = () => new Date().toISOString().slice(0, 10);
+async function bump(metric: string, n = 1) { await db.rpc("bump_stat", { p_day: today(), p_metric: metric, p_n: n }); }
+const MODES = new Set(["ia", "local", "online", "tour"]);
+async function ping(body: Record<string, unknown>) {
+  const h = await keyHash(body.key);
+  const ev = String(body.ev ?? "open"), d = today();
+  const { data: dev } = await db.from("devices").select("*").eq("key_hash", h).maybeSingle();
+  if (dev && (dev as { excluded: boolean }).excluded) { if (body.app && !(dev as { app: boolean }).app) await db.from("devices").update({ app: true }).eq("key_hash", h); return { ok: true, excluded: true }; }
+  if (!dev) { await db.from("devices").insert({ key_hash: h, app: !!body.app }); await bump("new_devices"); if (body.app) await bump("new_app"); }
+  else if (body.app && !(dev as { app: boolean }).app) await db.from("devices").update({ app: true }).eq("key_hash", h);
+  const { error } = await db.from("device_days").insert({ key_hash: h, day: d });
+  if (!error) {
+    await bump("active");
+    if (dev) { await bump("returning"); await db.from("devices").update({ last_day: d, days: (dev as { days: number }).days + 1 }).eq("key_hash", h); }
+  }
+  if (ev === "game") { await bump("games"); const mo = String(body.mode ?? ""); if (MODES.has(mo)) await bump("games_" + mo); }
+  if (ev === "share") await bump("shares");
+  return { ok: true };
+}
+const ADMIN_HASH = "05c27f680577f0abde5ef6d5baf30e213e56b24b0b219f81b1d82e52d6ce2ec7";
+async function adminStats(body: Record<string, unknown>) {
+  await adminCheck(body);
+  const since = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const { data: rows } = await db.from("daily_stats").select("day,metric,value").gte("day", since).order("day");
+  const { count: devices } = await db.from("devices").select("key_hash", { count: "exact", head: true }).eq("excluded", false);
+  const { count: accounts } = await db.from("accounts").select("key_hash", { count: "exact", head: true }).eq("excluded", false);
+  const { count: appDev } = await db.from("devices").select("key_hash", { count: "exact", head: true }).eq("excluded", false).eq("app", true);
+  // joueurs uniques = comptes (pseudo + code) + appareils actifs qui n'ont pas encore de compte
+  const { data: accKeys } = await db.from("accounts").select("key_hash").limit(100000);
+  const ak = new Set(((accKeys ?? []) as { key_hash: string }[]).map((x) => x.key_hash));
+  const { data: devKeys } = await db.from("devices").select("key_hash").eq("excluded", false).limit(100000);
+  const noAcc = ((devKeys ?? []) as { key_hash: string }[]).filter((x) => !ak.has(x.key_hash)).length;
+  let me: unknown = null;
+  if (typeof body.key === "string" && body.key.length >= 20) { const { data: md } = await db.from("devices").select("excluded").eq("key_hash", await keyHash(body.key)).maybeSingle(); me = md ? (md as { excluded: boolean }).excluded : false; }
+  const { count: players } = await db.from("leaderboard").select("key_hash", { count: "exact", head: true }).eq("hidden", false).gt("games", 0);
+  const { data: top } = await db.from("leaderboard").select("pseudo,fav,xp,games,refs").eq("hidden", false).order("xp", { ascending: false }).limit(10);
+  // rétention J+1 : appareils vus le lendemain de leur 1re visite (30 derniers jours)
+  const { data: firsts } = await db.from("devices").select("key_hash,first_day").eq("excluded", false).gte("first_day", since).lt("first_day", today());
+  let back = 0; const f = (firsts ?? []) as { key_hash: string; first_day: string }[];
+  for (const x of f) { const nd = new Date(Date.parse(x.first_day) + 86400000).toISOString().slice(0, 10); const { count } = await db.from("device_days").select("key_hash", { count: "exact", head: true }).eq("key_hash", x.key_hash).eq("day", nd); if (count) back++; }
+  const { data: champs } = await db.from("weekly_champions").select("week_key,pseudo,xp").order("week_key", { ascending: false }).limit(8);
+  return { rows, devices, players, top, d1: { cohort: f.length, back }, champs, accounts, noAcc, unique: (accounts ?? 0) + noAcc, appDev, meExcluded: me };
+}
+// ---------- Comptes : pseudo unique + code secret, sauvegarde de la progression ----------
+const normPseudo = (p: string) => p.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+const b64 = (u: Uint8Array) => btoa(String.fromCharCode(...u));
+const unb64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+let encKey: CryptoKey | null = null;
+async function ek() {
+  if (!encKey) {
+    const raw = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("acc:" + Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")));
+    encKey = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
+  }
+  return encKey;
+}
+async function enc(t: string) { const iv = crypto.getRandomValues(new Uint8Array(12)); const c = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await ek(), new TextEncoder().encode(t))); return b64(iv) + "." + b64(c); }
+async function dec(t: string) { const [i, c] = t.split("."); return new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(i) }, await ek(), unb64(c))); }
+async function pinHash(pin: string, salt: string) {
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(pin), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: new TextEncoder().encode(salt), iterations: 100000 }, k, 256);
+  return b64(new Uint8Array(bits));
+}
+const EASY = new Set(["0000", "1111", "2222", "3333", "4444", "5555", "6666", "7777", "8888", "9999", "1234", "4321", "0123", "2580", "1212"]);
+function checkPin(pin: unknown) {
+  const p = String(pin ?? "");
+  if (!/^\d{4}$/.test(p)) throw new Oops("Le code secret doit faire 4 chiffres.");
+  if (EASY.has(p)) throw new Oops("Ce code est trop facile à deviner, choisis-en un autre.");
+  return p;
+}
+function checkPseudo(v: unknown) {
+  const p = cleanName(v);
+  if (!String(v ?? "").trim() || normPseudo(p).length < 2) throw new Oops("Ton pseudo doit avoir au moins 2 lettres ou chiffres.");
+  return p;
+}
+type Acc = { pseudo_norm: string; pseudo: string; key_hash: string; pkey_enc: string; pin_hash: string; salt: string; save: Record<string, string> | null; save_at: string | null; fails: number; locked_until: string | null };
+const SAVE_KEYS = new Set(["ludo225-profil", "ludo225-perks", "ludo225-cos", "ludo225-skin", "ludo225-fav", "ludo225-name", "ludo225-defi", "ludo225-stats", "ludo225-tourwins", "ludo225-lv", "ludo225-quick", "ludo225-music"]);
+function cleanSave(v: unknown) {
+  if (!v || typeof v !== "object") return null;
+  const o: Record<string, string> = {};
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) if (SAVE_KEYS.has(k) && typeof x === "string" && x.length < 20000) o[k] = x;
+  return o;
+}
+async function accCheck(body: Record<string, unknown>) {
+  const n = normPseudo(cleanName(body.pseudo));
+  if (n.length < 2) return { free: false, short: true };
+  const { data } = await db.from("accounts").select("key_hash").eq("pseudo_norm", n).maybeSingle();
+  let mine = false;
+  if (data && typeof body.key === "string" && body.key.length >= 20) mine = (data as { key_hash: string }).key_hash === await keyHash(body.key);
+  return { free: !data || mine, mine };
+}
+async function accStatus(body: Record<string, unknown>) {
+  const h = await keyHash(body.key);
+  const { data } = await db.from("accounts").select("pseudo,save_at").eq("key_hash", h).maybeSingle();
+  return data ? { has: true, pseudo: (data as { pseudo: string }).pseudo, save_at: (data as { save_at: string }).save_at } : { has: false };
+}
+async function accCreate(body: Record<string, unknown>) {
+  const h = await keyHash(body.key);
+  const pseudo = checkPseudo(body.pseudo), n = normPseudo(pseudo), pin = checkPin(body.pin);
+  const { data: mineAcc } = await db.from("accounts").select("pseudo_norm").eq("key_hash", h).maybeSingle();
+  if (mineAcc) throw new Oops("Ce téléphone a déjà un compte.");
+  const { data: taken } = await db.from("accounts").select("pseudo_norm").eq("pseudo_norm", n).maybeSingle();
+  if (taken) throw new Oops("Ce pseudo est déjà pris.");
+  const salt = b64(crypto.getRandomValues(new Uint8Array(16)));
+  const { error } = await db.from("accounts").insert({ pseudo_norm: n, pseudo, key_hash: h, pkey_enc: await enc(String(body.key)), pin_hash: await pinHash(pin, salt), salt, save: cleanSave(body.save), save_at: body.save ? new Date().toISOString() : null });
+  if (error) throw new Oops(error.code === "23505" ? "Ce pseudo est déjà pris." : "Erreur serveur, réessaie.", error.code === "23505" ? 400 : 500);
+  await db.from("leaderboard").update({ pseudo }).eq("key_hash", h);
+  await bump("accounts");
+  return { ok: true, pseudo };
+}
+async function accRename(body: Record<string, unknown>) {
+  const h = await keyHash(body.key);
+  const pseudo = checkPseudo(body.pseudo), n = normPseudo(pseudo);
+  const { data: me } = await db.from("accounts").select("*").eq("key_hash", h).maybeSingle();
+  if (!me) return { ok: true, noacc: true };
+  const a = me as Acc;
+  if (a.pseudo_norm !== n) {
+    const { data: taken } = await db.from("accounts").select("pseudo_norm").eq("pseudo_norm", n).maybeSingle();
+    if (taken) throw new Oops("Ce pseudo est déjà pris.");
+    const { error } = await db.from("accounts").update({ pseudo_norm: n, pseudo }).eq("key_hash", h);
+    if (error) throw new Oops("Ce pseudo est déjà pris.");
+  } else await db.from("accounts").update({ pseudo }).eq("key_hash", h);
+  await db.from("leaderboard").update({ pseudo }).eq("key_hash", h);
+  return { ok: true, pseudo };
+}
+async function accSave(body: Record<string, unknown>) {
+  const h = await keyHash(body.key);
+  const sv = cleanSave(body.save);
+  if (!sv) throw new Oops("Sauvegarde vide.");
+  const { data } = await db.from("accounts").update({ save: sv, save_at: new Date().toISOString() }).eq("key_hash", h).select("pseudo");
+  if (typeof body.aid === "string" && body.aid.length >= 16 && body.aid.length <= 128) await linkAid(body.aid, h, String(body.key));
+  return { ok: true, saved: !!(data && data.length) };
+}
+async function linkAid(aid: string, h: string, key: string) {
+  const ah = await sha256("aid:" + aid);
+  const { data } = await db.from("device_links").select("key_hash").eq("aid_hash", ah).maybeSingle();
+  if (data && (data as { key_hash: string }).key_hash === h) { await db.from("device_links").update({ updated_at: new Date().toISOString() }).eq("aid_hash", ah); return; }
+  await db.from("device_links").upsert({ aid_hash: ah, key_hash: h, pkey_enc: await enc(key), updated_at: new Date().toISOString() });
+}
+// la sauvegarde vient du téléphone : on la recale sur les chiffres vérifiés par le serveur
+async function clampSave(h: string, sv: Record<string, string> | null) {
+  if (!sv) return sv;
+  const { data } = await db.from("leaderboard").select("xp,games,wins,caps,tours").eq("key_hash", h).maybeSingle();
+  try {
+    const p = JSON.parse(sv["ludo225-profil"] ?? "null");
+    if (p && typeof p === "object") {
+      const lb = (data ?? { xp: 0, games: 0, wins: 0, caps: 0, tours: 0 }) as Record<string, number>;
+      for (const k of ["xp", "games", "wins", "caps", "tours"]) if (typeof p[k] === "number") p[k] = Math.min(p[k], lb[k] ?? 0);
+      sv["ludo225-profil"] = JSON.stringify(p);
+    }
+  } catch { /* sauvegarde illisible : on la rend telle quelle */ }
+  return sv;
+}
+const LOCK_FAILS = 5, LOCK_MIN = 30;
+async function accRestore(body: Record<string, unknown>) {
+  const n = normPseudo(cleanName(body.pseudo));
+  const pin = String(body.pin ?? "");
+  const { data } = await db.from("accounts").select("*").eq("pseudo_norm", n).maybeSingle();
+  if (!data) throw new Oops("Aucun compte avec ce pseudo.", 404);
+  const a = data as Acc;
+  if (a.locked_until && Date.parse(a.locked_until) > Date.now()) throw new Oops(`Trop d'essais. Réessaie dans ${Math.ceil((Date.parse(a.locked_until) - Date.now()) / 60000)} min.`, 429);
+  if (!/^\d{4}$/.test(pin) || (await pinHash(pin, a.salt)) !== a.pin_hash) {
+    const f = a.fails + 1;
+    await db.from("accounts").update(f >= LOCK_FAILS ? { fails: 0, locked_until: new Date(Date.now() + LOCK_MIN * 60000).toISOString() } : { fails: f }).eq("pseudo_norm", n);
+    throw new Oops(f >= LOCK_FAILS ? `Code faux. Compte bloqué ${LOCK_MIN} min.` : `Code faux. Encore ${LOCK_FAILS - f} essai${LOCK_FAILS - f > 1 ? "s" : ""}.`, 403);
+  }
+  await db.from("accounts").update({ fails: 0, locked_until: null }).eq("pseudo_norm", n);
+  await bump("restores");
+  return { ok: true, pseudo: a.pseudo, key: await dec(a.pkey_enc), save: await clampSave(a.key_hash, a.save) };
+}
+async function aidRestore(body: Record<string, unknown>) {
+  if (typeof body.aid !== "string" || body.aid.length < 16 || body.aid.length > 128) throw new Oops("Identifiant invalide.");
+  const { data } = await db.from("device_links").select("*").eq("aid_hash", await sha256("aid:" + body.aid)).maybeSingle();
+  if (!data) return { found: false };
+  const l = data as { key_hash: string; pkey_enc: string };
+  const { data: acc } = await db.from("accounts").select("pseudo,save").eq("key_hash", l.key_hash).maybeSingle();
+  const a = acc as { pseudo: string; save: Record<string, string> | null } | null;
+  if (!a || !a.save) return { found: false };
+  await bump("restores_auto");
+  return { found: true, pseudo: a.pseudo, key: await dec(l.pkey_enc), save: await clampSave(l.key_hash, a.save) };
+}
+async function adminExclude(body: Record<string, unknown>) {
+  await adminCheck(body);
+  const h = await keyHash(body.key);
+  const on = body.on !== false;
+  const { data } = await db.from("devices").select("key_hash").eq("key_hash", h).maybeSingle();
+  if (data) await db.from("devices").update({ excluded: on }).eq("key_hash", h);
+  else await db.from("devices").insert({ key_hash: h, excluded: on });
+  await db.from("accounts").update({ excluded: on }).eq("key_hash", h);
+  return { ok: true, excluded: on };
+}
+async function adminCheck(body: Record<string, unknown>) {
+  if (typeof body.secret !== "string" || (await sha256("adm:" + body.secret.trim().toUpperCase())) !== ADMIN_HASH) throw new Oops("Code admin incorrect.", 403);
 }
 // victoires en ligne vérifiées : comptées par le serveur à la fin d'un clash avec au moins 2 vrais joueurs
 async function onlineOver(code: string, s: State) {
@@ -347,6 +619,17 @@ async function handle(body: Record<string, unknown>) {
 
   if (action === "lb_sync") return await lbSync(body);
   if (action === "lb_top") return await lbTop(body);
+  if (action === "lb_ref") return await lbRef(body);
+  if (action === "ping") return await ping(body);
+  if (action === "admin_stats") return await adminStats(body);
+  if (action === "admin_exclude") return await adminExclude(body);
+  if (action === "acc_check") return await accCheck(body);
+  if (action === "acc_status") return await accStatus(body);
+  if (action === "acc_create") return await accCreate(body);
+  if (action === "acc_rename") return await accRename(body);
+  if (action === "acc_save") return await accSave(body);
+  if (action === "acc_restore") return await accRestore(body);
+  if (action === "aid_restore") return await aidRestore(body);
 
   const room = await loadRoom(code);
   const s = room.state;

@@ -8,6 +8,7 @@ main{max-width:720px;margin:0 auto;padding:20px 16px 40px;display:flex;flex-dire
 h1{margin:0;font:400 30px var(--d);color:var(--o);-webkit-text-stroke:2px #fff;paint-order:stroke fill}h1 span{color:var(--g)}
 h2{margin:0 0 8px;font:400 19px var(--d);color:var(--ol)}
 .card{padding:14px;border-radius:18px;background:#00000040;border:2px solid #ffffff22}
+#excl{margin-top:4px;padding:12px 16px;border-radius:12px;border:0;background:#F77F00;color:#fff;font:700 15px var(--b);cursor:pointer}.kpi.big{border-color:#7CF0A8}.kpi.big b{color:#7CF0A8}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
 .kpi{padding:12px;border-radius:14px;background:#ffffff0f;border:1.5px solid #ffffff22}.kpi b{display:block;font:400 30px var(--d);color:var(--y)}.kpi span{font:600 13px var(--b);color:var(--muted)}
 .chart{display:flex;align-items:flex-end;gap:3px;height:150px;padding-top:8px}
@@ -27,8 +28,9 @@ button{font:400 17px var(--d);padding:12px 18px;border-radius:12px;border:2px so
 <script>
 const SB='https://fjtzyjjbftdrgmayvuqx.supabase.co/functions/v1/clash',KEY='sb_publishable_XLEZldSG4D4FeJEk4tdg7w_2z7amj-s';
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const myKey=()=>{try{const k=localStorage.getItem('ludo225-key')||'';return k.length>=20?k:'';}catch(e){return '';}};
 const ART={didib:'Didi B',elown:'Elown',himra:'Himra',suspect95:'Suspect 95'};
-async function load(code){const r=await fetch(SB,{method:'POST',headers:{'Content-Type':'application/json',apikey:KEY},body:JSON.stringify({action:'admin_stats',secret:code})});
+async function load(code){const r=await fetch(SB,{method:'POST',headers:{'Content-Type':'application/json',apikey:KEY},body:JSON.stringify({action:'admin_stats',secret:code,...(myKey()?{key:myKey()}:{})})});
   const j=await r.json();if(!r.ok)throw new Error(j.error||'Erreur');return j;}
 function render(j){const days=[];for(let k=13;k>=0;k--){const d=new Date(Date.now()-k*86400000).toISOString().slice(0,10);days.push(d);}
   const v=(d,m)=>(j.rows.find(x=>x.day===d&&x.metric===m)||{value:0}).value,sum=m=>j.rows.reduce((a,x)=>a+(x.metric===m?x.value:0),0);
@@ -39,7 +41,8 @@ function render(j){const days=[];for(let k=13;k>=0;k--){const d=new Date(Date.no
     <div class="kpi"><b>${v(t,'active')}</b><span>joueurs actifs</span></div><div class="kpi"><b>${v(t,'new_devices')}</b><span>nouveaux</span></div>
     <div class="kpi"><b>${v(t,'games')}</b><span>clashs joués</span></div><div class="kpi"><b>${v(t,'shares')}</b><span>partages</span></div></div></section>
   <section class="card"><h2>Depuis le début</h2><div class="kpis">
-    <div class="kpi"><b>${j.devices??0}</b><span>téléphones</span></div><div class="kpi"><b>${j.players??0}</b><span>joueurs avec pseudo</span></div>
+    <div class="kpi big"><b>${j.unique??0}</b><span>joueurs uniques</span></div><div class="kpi"><b>${j.accounts??0}</b><span>comptes (pseudo + code)</span></div>
+    <div class="kpi"><b>${j.noAcc??0}</b><span>sans compte encore</span></div><div class="kpi"><b>${j.appDev??0}</b><span>sur l'appli Android</span></div>
     <div class="kpi"><b>${d1}</b><span>reviennent le lendemain (${j.d1.back}/${j.d1.cohort})</span></div><div class="kpi"><b>${sum('referrals')}</b><span>parrainages (30 j)</span></div></div></section>
   <section class="card"><h2>14 derniers jours</h2><div class="chart">${days.map(d=>{const a=v(d,'active'),n=v(d,'new_devices');
       return `<div class="bar" title="${d} : ${a} actifs, ${n} nouveaux"><i class="a" style="height:${(a-n)/max*130}px"></i><i class="n" style="height:${n/max*130}px"></i><small>${d.slice(8)}</small></div>`;}).join('')}</div>
@@ -50,7 +53,11 @@ function render(j){const days=[];for(let k=13;k>=0;k--){const d=new Date(Date.no
   <section class="card"><h2>Top 10 joueurs</h2><table><tr><th>#</th><th>Pseudo</th><th>Clan</th><th class="n">XP</th><th class="n">Clashs</th><th class="n">Filleuls</th></tr>
     ${(j.top||[]).map((p,i)=>`<tr><td>${i+1}</td><td>${esc(p.pseudo)}</td><td>${ART[p.fav]||''}</td><td class="n">${p.xp}</td><td class="n">${p.games}</td><td class="n">${p.refs}</td></tr>`).join('')||'<tr><td colspan="6">Personne pour l\'instant.</td></tr>'}</table></section>
   <section class="card"><h2>Boss de la semaine</h2><table>${(j.champs||[]).map(c=>`<tr><td>${c.week_key}</td><td>👑 ${esc(c.pseudo)}</td><td class="n">${c.xp} XP</td></tr>`).join('')||'<tr><td>Le premier sera couronné lundi.</td></tr>'}</table></section>
-  <p class="note">Chiffres anonymes : chaque téléphone est compté par une clé aléatoire, sans nom ni numéro.</p>`;
+  <section class="card"><h2>Tes téléphones</h2><p class="note" style="text-align:left">${myKey()?(j.meExcluded?'✅ Ce navigateur n\'est <b>pas</b> compté dans les chiffres.':'Ce navigateur est compté comme un joueur. Touche le bouton pour l\'enlever des chiffres.'):'Ce navigateur n\'a jamais ouvert le jeu : rien à exclure ici.'}</p>
+    ${myKey()?`<button id="excl">${j.meExcluded?'Le compter à nouveau':'Ne pas compter ce téléphone'}</button>`:''}
+    <p class="note" style="text-align:left">Dans l'appli Android : Profil, tout en bas, touche 5 fois « Ludo Clash 225 · v62 » puis entre ton code admin.</p></section>
+  <p class="note">Un joueur = un compte (pseudo + code secret), même s'il change de téléphone. Les joueurs sans compte sont comptés par téléphone. Tes téléphones exclus ne sont pas comptés.</p>`;
+  const ex=document.getElementById('excl');if(ex)ex.onclick=async()=>{ex.disabled=true;try{const r=await fetch(SB,{method:'POST',headers:{'Content-Type':'application/json',apikey:KEY},body:JSON.stringify({action:'admin_exclude',secret:sessionStorage.getItem('adm'),key:myKey(),on:!j.meExcluded})});if(!r.ok)throw 0;go(sessionStorage.getItem('adm'));}catch(e){ex.disabled=false;ex.textContent='Erreur, réessaie';}};
   document.getElementById('out').hidden=false;document.getElementById('loginBox').hidden=true;}
 async function go(code){const e=document.getElementById('err');e.textContent='Chargement…';
   try{const j=await load(code);try{sessionStorage.setItem('adm',code);}catch(_){}e.textContent='';render(j);}catch(x){e.textContent=x.message;}}
