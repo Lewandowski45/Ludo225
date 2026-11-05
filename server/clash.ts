@@ -30,11 +30,11 @@ const STARTSET = new Set(START);
 const P_SIX = 0.23, P_ANTISTACK = 0.85;
 
 type Ev = Record<string, unknown>;
-type Seat = { name: string | null; bot: boolean };
+type Seat = { name: string | null; bot: boolean; art?: number };
 type State = {
   seats: Seat[]; people: { name: string; team: number | null; host: boolean; cos?: Record<string, string> | null }[]; level: string;
   active: boolean[]; isBot: boolean[]; pos: number[][]; cur: number; phase: string; dice: number;
-  movable: number[]; ranks: number[]; sixes: number; firstOut: boolean; evs: Ev[]; np?: number;
+  movable: number[]; ranks: number[]; sixes: number; firstOut: boolean; evs: Ev[]; np?: number; art?: number[];
 };
 
 const tIdx = (t: number, p: number) => (START[t] + p) % 52;
@@ -581,7 +581,7 @@ async function onlineOver(code: string, s: State) {
 
 function emptyState(): State {
   return {
-    seats: [0, 1, 2, 3].map(() => ({ name: null, bot: false })), people: [], level: "yere",
+    seats: [0, 1, 2, 3].map((t) => ({ name: null, bot: false, art: t })), people: [], level: "yere",
     active: [false, false, false, false], isBot: [false, false, false, false],
     pos: [0, 1, 2, 3].map(() => [-1, -1, -1, -1]), cur: 0, phase: "lobby", dice: 0, movable: [],
     ranks: [], sixes: 0, firstOut: false, evs: [],
@@ -612,7 +612,8 @@ async function refreshPeople(code: string, s: State) {
   s.people = (data ?? []).map((p: { name: string; team: number | null; is_host: boolean; cos: Record<string, string> | null }) => ({ name: p.name, team: p.team, host: p.is_host, cos: p.cos ?? null }));
   for (let t = 0; t < 4; t++) {
     const h = s.people.find((p) => p.team === t);
-    s.seats[t] = { name: h ? h.name : null, bot: h ? false : s.seats[t].bot };
+    const a = Number(s.seats[t]?.art);
+    s.seats[t] = { name: h ? h.name : null, bot: h ? false : s.seats[t].bot, art: a >= 0 && a <= 3 ? a : t };
   }
 }
 
@@ -694,7 +695,17 @@ async function handle(body: Record<string, unknown>) {
       if (s.seats[t].name && p.team !== t) throw new Oops("Cet artiste est déjà pris.");
       await db.from("players").update({ team: t }).eq("id", p.id);
       s.seats[t].bot = false;
+      if (p.team !== t) s.seats[t].art = t;
       await refreshPeople(code, s);
+      break;
+    }
+    case "art": {
+      if (room.status !== "lobby") throw new Oops("Le clash a déjà commencé.");
+      const t = Number(body.team), a = Number(body.art);
+      if (!(t >= 0 && t <= 3) || !(a >= 0 && a <= 3)) throw new Oops("Artiste invalide.");
+      const ok = p.team === t || (p.is_host && !s.seats[t].name && s.seats[t].bot);
+      if (!ok) throw new Oops("Tu ne peux pas changer cet artiste.", 403);
+      s.seats[t].art = a;
       break;
     }
     case "setbot": {
@@ -721,9 +732,31 @@ async function handle(body: Record<string, unknown>) {
       if (room.status !== "lobby") throw new Oops("Le clash a déjà commencé.");
       if (!p.is_host) throw new Oops("Seul l'hôte peut lancer le clash.", 403);
       await refreshPeople(code, s);
-      const act = s.seats.map((x) => !!x.name || x.bot);
+      let act = s.seats.map((x) => !!x.name || x.bot);
       if (act.filter(Boolean).length < 2) throw new Oops("Faut au moins 2 artistes pour faire clash !");
       if (s.people.some((x) => x.team === null)) throw new Oops("Tout le monde doit choisir son artiste avant de lancer.");
+      /* 1 contre 1 : toujours face à face (rouge-jaune ou vert-bleu), côté tiré au sort */
+      {
+        const ids = [0, 1, 2, 3].filter((t) => act[t]);
+        if (ids.length === 2) {
+          const k = rndInt(2), src = [ids[k], ids[1 - k]];
+          const A = Number(s.seats[src[0]].art ?? src[0]), tgt = [A, (A + 2) % 4];
+          if (src[0] !== tgt[0] || src[1] !== tgt[1]) {
+            const old = s.seats.map((x) => ({ ...x }));
+            const ns: Seat[] = [0, 1, 2, 3].map((t) => ({ name: null, bot: false, art: t }));
+            ns[tgt[0]] = { ...old[src[0]] }; ns[tgt[1]] = { ...old[src[1]] };
+            const { data: pl } = await db.from("players").select("id,team").eq("room", code);
+            for (const x of (pl ?? []) as { id: string; team: number | null }[]) {
+              const j = src.indexOf(x.team as number);
+              if (j >= 0 && src[j] !== tgt[j]) await db.from("players").update({ team: tgt[j] }).eq("id", x.id);
+            }
+            s.seats = ns;
+            await refreshPeople(code, s);
+            act = s.seats.map((x) => !!x.name || x.bot);
+          }
+        }
+      }
+      s.art = s.seats.map((x, t) => { const a = Number(x.art); return a >= 0 && a <= 3 ? a : t; });
       s.active = act; s.isBot = s.seats.map((x) => !x.name && x.bot);
       // clash rapide : les pions en trop sont déjà « rentrés » (56) et ne jouent pas
       const np = s.np === 2 ? 2 : 4;
