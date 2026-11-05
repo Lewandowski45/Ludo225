@@ -600,12 +600,24 @@ async function me(code: string, token: unknown) {
   if (!data) throw new Oops("Accès refusé.", 403);
   return data as { id: string; name: string; team: number | null; is_host: boolean };
 }
-async function save(room: { code: string; seq: number }, s: State, status?: string) {
+type Row = { code: string; status: string; seq: number; state: State };
+async function save(room: { code: string; seq: number; status?: string }, s: State, status?: string): Promise<Row> {
   const patch: Record<string, unknown> = { state: s, seq: room.seq + 1, updated_at: new Date().toISOString() };
   if (status) patch.status = status;
   const { data, error } = await db.from("rooms").update(patch).eq("code", room.code).eq("seq", room.seq).select("seq");
   if (error) throw new Oops("Erreur serveur, réessaie.", 500);
   if (!data || !data.length) throw new Oops("conflict", 409);
+  const row = { code: room.code, status: status ?? room.status ?? "lobby", seq: room.seq + 1, state: s };
+  await cast(row);
+  return row;
+}
+// envoi direct du nouvel état aux téléphones du salon (plus rapide que d'attendre l'écoute de la base)
+const RT_URL = Deno.env.get("SUPABASE_URL") + "/realtime/v1/api/broadcast", SRK = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+async function cast(row: Row) {
+  try {
+    await fetch(RT_URL, { method: "POST", headers: { apikey: SRK, Authorization: `Bearer ${SRK}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{ topic: "room-" + row.code, event: "row", payload: row }] }) });
+  } catch (e) { console.error(e); }
 }
 async function refreshPeople(code: string, s: State) {
   const { data } = await db.from("players").select("name,team,is_host,cos").eq("room", code).order("created_at");
@@ -664,6 +676,9 @@ async function handle(body: Record<string, unknown>) {
   if (action === "aid_restore") return await aidRestore(body);
   if (action === "acc_delete") return await accDelete(body);
 
+  // le salon et le joueur sont lus en même temps (une attente au lieu de deux)
+  const meP = action === "bot" ? null : me(code, body.token);
+  meP?.catch(() => {});
   const room = await loadRoom(code);
   const s = room.state;
   s.evs = [];
@@ -680,12 +695,12 @@ async function handle(body: Record<string, unknown>) {
     else if (s.phase === "move") applyMove(s, s.cur, chooseMove(s, s.cur, s.dice), s.dice, s.evs);
     else return { ok: true, skipped: true };
     s.level = lvl;
-    await save(room, s, s.phase === "over" ? "over" : undefined);
+    const row = await save(room, s, s.phase === "over" ? "over" : undefined);
     if (s.phase === "over") await onlineOver(code, s);
-    return { ok: true };
+    return { ok: true, row };
   }
 
-  const p = await me(code, body.token);
+  const p = await meP!;
 
   switch (action) {
     case "pick": {
@@ -765,8 +780,7 @@ async function handle(body: Record<string, unknown>) {
       /* le clan qui commence est tiré au sort (sinon le rouge aurait toujours l'avantage du 1er lancer) */
       { const ids = [0, 1, 2, 3].filter((t) => act[t]); s.cur = ids[rndInt(ids.length)]; } s.phase = "roll";
       s.evs.push({ k: "start" }, { k: "turn", t: s.cur });
-      await save(room, s, "playing");
-      return { ok: true };
+      return { ok: true, row: await save(room, s, "playing") };
     }
     case "roll": {
       if (room.status !== "playing" || s.phase !== "roll") throw new Oops("Ce n'est pas le moment de lancer.");
@@ -786,8 +800,7 @@ async function handle(body: Record<string, unknown>) {
       if (!p.is_host) throw new Oops("Seul l'hôte peut relancer.", 403);
       s.phase = "lobby"; s.evs = [{ k: "lobby" }];
       await refreshPeople(code, s);
-      await save(room, s, "lobby");
-      return { ok: true };
+      return { ok: true, row: await save(room, s, "lobby") };
     }
     case "leave": {
       if (room.status === "lobby") {
@@ -809,9 +822,9 @@ async function handle(body: Record<string, unknown>) {
     }
     default: throw new Oops("Action inconnue.");
   }
-  await save(room, s, s.phase === "over" ? "over" : undefined);
+  const row = await save(room, s, s.phase === "over" ? "over" : undefined);
   if (s.phase === "over" && (action === "move" || action === "roll")) await onlineOver(code, s);
-  return { ok: true };
+  return { ok: true, row };
 }
 
 Deno.serve(async (req) => {
