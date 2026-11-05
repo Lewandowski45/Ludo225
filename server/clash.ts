@@ -181,6 +181,15 @@ function chooseMove(s: State, t: number, d: number) {
   return best;
 }
 
+// les bots jouent tout de suite à la suite (un seul aller-retour réseau au lieu d'un par coup de bot)
+function botChain(s: State) {
+  for (let n = 0; n < 60 && s.phase !== "over" && s.isBot[s.cur]; n++) {
+    if (s.phase === "roll") doRoll(s, s.evs);
+    else if (s.phase === "move") applyMove(s, s.cur, chooseMove(s, s.cur, s.dice), s.dice, s.evs);
+    else break;
+  }
+}
+
 // ---------- Salons ----------
 const ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const newCode = () => Array.from({ length: 5 }, () => ALPHA[rndInt(ALPHA.length)]).join("");
@@ -695,6 +704,7 @@ async function handle(body: Record<string, unknown>) {
     else if (s.phase === "move") applyMove(s, s.cur, chooseMove(s, s.cur, s.dice), s.dice, s.evs);
     else return { ok: true, skipped: true };
     s.level = lvl;
+    botChain(s);
     const row = await save(room, s, s.phase === "over" ? "over" : undefined);
     if (s.phase === "over") await onlineOver(code, s);
     return { ok: true, row };
@@ -780,12 +790,16 @@ async function handle(body: Record<string, unknown>) {
       /* le clan qui commence est tiré au sort (sinon le rouge aurait toujours l'avantage du 1er lancer) */
       { const ids = [0, 1, 2, 3].filter((t) => act[t]); s.cur = ids[rndInt(ids.length)]; } s.phase = "roll";
       s.evs.push({ k: "start" }, { k: "turn", t: s.cur });
-      return { ok: true, row: await save(room, s, "playing") };
+      botChain(s);
+      const row0 = await save(room, s, s.phase === "over" ? "over" : "playing");
+      if (s.phase === "over") await onlineOver(code, s);
+      return { ok: true, row: row0 };
     }
     case "roll": {
       if (room.status !== "playing" || s.phase !== "roll") throw new Oops("Ce n'est pas le moment de lancer.");
       if (p.team !== s.cur) throw new Oops("Ce n'est pas ton tour.");
       doRoll(s, s.evs);
+      botChain(s);
       break;
     }
     case "move": {
@@ -794,6 +808,7 @@ async function handle(body: Record<string, unknown>) {
       const i = Number(body.pawn);
       if (!s.movable.includes(i)) throw new Oops("Ce pion ne peut pas bouger.");
       applyMove(s, s.cur, i, s.dice, s.evs);
+      botChain(s);
       break;
     }
     case "rematch": {
